@@ -16,8 +16,6 @@ var Bitcore_ = {
   bch: require('bitcore-lib-cash')
 };
 
-
-
 var Common = require('../../lib/common');
 var Utils = Common.Utils;
 var Constants = Common.Constants;
@@ -41,7 +39,6 @@ describe('History V8', function() {
     helpers.beforeEach(function(res) {
       storage = res.storage;
       blockchainExplorer = res.blockchainExplorer;
-      helpers.setupGroupingBE(blockchainExplorer);
       request = res.request;
       done();
     });
@@ -51,6 +48,26 @@ describe('History V8', function() {
   });
 
   var BCHEIGHT =  10000;
+
+  describe.skip('#checkWalletData', function() {
+    it('should check wallet data', (done) => {
+      blockchainExplorer.getBlockchainHeight = sinon.stub().callsArgWith(0, null, BCHEIGHT, 'hash');
+      helpers.createAndJoinWallet(1, 1, function(s, w) {
+        server = s;
+        wallet = w;
+        helpers.createAddresses(server, wallet, 1, 1, function(main, change) {
+          mainAddresses = main;
+          changeAddresses = change;
+          helpers.stubFeeLevels({
+            24: 10000,
+          });
+          helpers.stubCheckData(blockchainExplorer, server, wallet.coin == 'bch', done);
+        });
+      });
+    });
+  });
+
+ 
 
   describe('#getTxHistoryV8', function() {
     var server, wallet, mainAddresses, changeAddresses;
@@ -65,12 +82,12 @@ describe('History V8', function() {
           helpers.stubFeeLevels({
             24: 10000,
           });
-          done();
+          helpers.stubCheckData(blockchainExplorer, server, wallet.coin == 'bch', done);
         });
       });
     });
 
-    it('should get tx history from insight, 3 items page', function(done) {
+    it('should get tx history from insight, 20 items', function(done) {
       helpers.stubHistoryV8(50, BCHEIGHT);
       server.getTxHistory({limit: 20}, function(err, txs, fromCache) {
         should.not.exist(err);
@@ -91,6 +108,111 @@ describe('History V8', function() {
           i++;
         });
         done();
+      });
+    });
+
+    it('should handle moves, filtering change addresses (case 1)', function(done) {
+      let txs= helpers.createTxsV8(20, 1000);
+      helpers.createAddresses(server, wallet, 1, 1, function(main, change) {
+
+        // 2 move tx.
+        txs[0].address =change[0].address;
+        txs[0].txid =txs[1].txid;
+        txs[0].height =txs[1].height;
+        txs[1].address =main[0].address;
+        txs[0].category=txs[1].category='move';
+        
+        helpers.stubHistoryV8(null, null, txs);
+
+        server.getTxHistory({limit: 10}, function(err, txs, fromCache) {
+          should.not.exist(err);
+          fromCache.should.equal(false);
+          should.exist(txs);
+          txs.length.should.equal(10);
+
+          // should filter out 1 move
+          txs[0].action.should.equal('moved');
+          txs[1].action.should.equal('received');
+
+          // should keep the main address
+          txs[0].outputs[0].address.should.equal(main[0].address);
+
+          done();
+        });
+      });
+    });
+
+
+    it('should handle moves, filtering change addresses (case 2)', function(done) {
+      let txs= helpers.createTxsV8(20, 1000);
+      helpers.createAddresses(server, wallet, 1, 1, function(main, change) {
+
+        // 2 move tx, inverted vouts
+        txs[0].address =main[0].address;
+        txs[0].txid =txs[1].txid;
+        txs[0].height =txs[1].height;
+        txs[1].address =change[0].address;
+        txs[0].category=txs[1].category='move';
+        
+        helpers.stubHistoryV8(null, null, txs);
+
+        server.getTxHistory({limit: 10}, function(err, txs, fromCache) {
+          should.not.exist(err);
+          fromCache.should.equal(false);
+          should.exist(txs);
+          txs.length.should.equal(10);
+
+          // should filter out 1 move
+          txs[0].action.should.equal('moved');
+          txs[1].action.should.equal('received');
+
+          // should keep the main address
+          txs[0].outputs[0].address.should.equal(main[0].address);
+
+          done();
+        });
+      });
+    });
+
+
+    it('should handle moves, filtering change addresses in multisend', function(done) {
+      let txs= helpers.createTxsV8(20, 1000);
+      helpers.createAddresses(server, wallet, 2, 1, function(main, change) {
+
+
+        txs[0].txid    =txs[1].txid     = txs[2].txid   =txs[3].txid;
+        txs[0].height  =txs[1].height   = txs[2].height =txs[3].height;
+        txs[0].category=txs[1].category= txs[2].category=txs[3].category='move';
+
+        txs[0].address =main[0].address;
+        txs[1].address =main[0].address;
+        txs[2].address =change[0].address;
+        txs[3].address =main[1].address;
+        
+        helpers.stubHistoryV8(null, null, txs);
+
+        server.getTxHistory({limit: 10}, function(err, txs, fromCache) {
+          should.not.exist(err);
+          fromCache.should.equal(false);
+          should.exist(txs);
+          txs.length.should.equal(10);
+
+          // should filter out 1 move
+          txs[0].action.should.equal('moved');
+          txs[1].action.should.equal('received');
+
+          // should keep the main address
+          _.map(txs[0].outputs,'address').should.include(
+            main[0].address,
+            main[1].address,
+          );
+
+          _.map(txs[0].outputs,'address').should.not.include(
+            change[0].address,
+          );
+ 
+          done();
+        });
       });
     });
 
@@ -165,8 +287,38 @@ describe('History V8', function() {
       });
     });
 
+    it('should get tx history from cache and bc mixed, updating confirmations', function(done) {
+      var _cache = Defaults.CONFIRMATIONS_TO_START_CACHING;
+      var _time = Defaults.BLOCKHEIGHT_CACHE_TIME ;
+      Defaults.CONFIRMATIONS_TO_START_CACHING = 10;
 
-    
+      // remove bc tip cache.
+      Defaults.BLOCKHEIGHT_CACHE_TIME = 0;
+      helpers.stubHistoryV8(50, BCHEIGHT); //(0->49)
+
+      // this call is to fill the cache
+      server.getTxHistory({limit: 20}, function(err, txs, fromCache) {
+        should.not.exist(err);
+        fromCache.should.equal(false);
+
+        // change height from 10000 to 10100
+        let heightOffset = 100;
+        blockchainExplorer.getBlockchainHeight = sinon.stub().callsArgWith(0, null, 10000 + heightOffset, 'hash');
+        server.getTxHistory({skip: 5, limit: 20}, function(err, txs, fromCache) {
+          should.not.exist(err);
+          fromCache.should.equal(true);
+          var i = 5;
+          _.each(txs, function(tx) {
+            tx.confirmations.should.equal(i + heightOffset);
+            i++;
+          });
+          Defaults.BLOCKHEIGHT_CACHE_TIME = _time;
+          Defaults.CONFIRMATIONS_TO_START_CACHING = _cache;
+          done();
+        });
+      });
+    });
+
     describe("Stream cache", () => {
       it('should not stream cache on first call', function(done) {
         this.timeout(10000);
@@ -420,11 +572,9 @@ describe('History V8', function() {
     });
 
     it('should get tx history with accepted proposal, multisend', function(done) {
-      server._normalizeTxHistory = sinon.stub().returnsArg(0);
       var external = '18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7';
 
       helpers.stubUtxos(server, wallet, [1, 2], function(utxos) {
-
         var txOpts = {
           outputs: [{
             toAddress: external,
@@ -450,7 +600,6 @@ describe('History V8', function() {
             txProposalId: tx.id,
             signatures: signatures,
           }, function(err, tx) {
-console.log('[historyV8.js.450:err:]',err); //TODO
             should.not.exist(err);
 
             helpers.stubBroadcast();
@@ -492,6 +641,7 @@ console.log('[historyV8.js.450:err:]',err); //TODO
               ]; 
  
               helpers.stubHistoryV8(null, null,txs);
+              helpers.stubCheckData(blockchainExplorer, server, wallet.coin == 'bch', () =>{ 
 
               server.getTxHistory({}, function(err, txs) {
                 should.not.exist(err);
@@ -520,6 +670,7 @@ console.log('[historyV8.js.450:err:]',err); //TODO
                 should.exist(tx.customData);
                 should.exist(tx.customData["test"]);
                 done();
+              });
               });
             });
           });
@@ -578,7 +729,6 @@ console.log('[historyV8.js.450:err:]',err); //TODO
         expected: [],
       }];
 
-      server._normalizeTxHistory = sinon.stub().returnsArg(0);
       var timestamps = [50, 40, 30, 20, 10];
       var txs = _.map(timestamps, function(ts, idx) {
         return {
@@ -643,7 +793,6 @@ console.log('[historyV8.js.450:err:]',err); //TODO
       helpers.stubFeeLevels({
         24: 10000,
       });
-      server._normalizeTxHistory = sinon.stub().returnsArg(0);
       var txs = [{
         txid: '1',
         confirmations: 0,
@@ -704,7 +853,6 @@ console.log('[historyV8.js.450:err:]',err); //TODO
     });
     it.skip('should get tx history even if fee levels are unavailable', function(done) {
       blockchainExplorer.estimateFee = sinon.stub().yields('dummy error');
-      server._normalizeTxHistory = sinon.stub().returnsArg(0);
       var txs = [{
         txid: '1',
         confirmations: 1,
@@ -737,7 +885,6 @@ console.log('[historyV8.js.450:err:]',err); //TODO
       helpers.stubHistoryV8(x);
 
 
-//console.log('[server.js.7149]',HugeTxs[1].vin); //TODO
       server.getTxHistory({}, function(err, txs) {
         should.not.exist(err);
         should.exist(txs);
